@@ -1,0 +1,22 @@
+Operating Systems - Unit 2: Process Management
+Question Bank
+
+1. What is a process? Explain the difference between a process and a program.
+
+2. Describe the various states of a process and explain the transitions between them.
+
+3. What is CPU scheduling? Explain the First-Come-First-Serve (FCFS) scheduling algorithm with an example.
+
+4. Explain the Round Robin scheduling algorithm. What is the significance of time quantum?
+
+5. What is deadlock? State the four necessary conditions for deadlock to occur.
+
+6. Explain Banker's Algorithm for deadlock avoidance with a suitable example.
+
+7. What is the difference between preemptive and non-preemptive scheduling?
+
+8. Explain the concept of a semaphore and how it is used for process synchronization.
+
+9. What is the Critical Section Problem? Explain Peterson's Solution.
+
+10. Differentiate between multiprogramming, multitasking, and multithreading.
