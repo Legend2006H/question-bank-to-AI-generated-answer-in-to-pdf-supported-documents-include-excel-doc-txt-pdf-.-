@@ -1,21 +1,8 @@
-"""
-QB Solver - Question Bank Answer Generator
-==========================================
-Reads your question bank (PDF/DOCX/TXT/XLSX) and generates
-detailed answers as a clean, formatted PDF.
-
-Usage:
-    python qb_solver.py <your_file>
-
-Examples:
-    python qb_solver.py questions.pdf
-    python qb_solver.py questions.docx
-    python qb_solver.py questions.txt
-"""
 
 import sys
 import os
 import re
+import getpass
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -23,14 +10,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Groq API ──────────────────────────────────────────────────────────────────
 from groq import Groq
 
-GROQ_API_KEY = private = os.getenv("API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("API_KEY")
+client = None
 MODEL  = "llama-3.3-70b-versatile"
 
-# ── PDF generation ────────────────────────────────────────────────────────────
+
+def get_groq_client():
+    global GROQ_API_KEY, client
+    if client:
+        return client
+
+    if not GROQ_API_KEY:
+        GROQ_API_KEY = getpass.getpass("  Enter your Groq API key: ").strip()
+
+    if not GROQ_API_KEY:
+        raise ValueError("Groq API key is required.")
+
+    client = Groq(api_key=GROQ_API_KEY)
+    return client
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
@@ -41,7 +41,6 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 
-# ── File parsers ──────────────────────────────────────────────────────────────
 import pdfplumber
 from pypdf import PdfReader
 
@@ -58,9 +57,6 @@ except ImportError:
     XLSX_OK = False
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FILE READING
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def read_file(filepath):
     path = Path(filepath)
@@ -125,21 +121,9 @@ def read_txt(filepath):
     raise ValueError(f"Cannot decode {filepath}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  AI — EXTRACT QUESTIONS
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def extract_questions(raw_text):
-    """
-    Extract questions locally using regex — no API call, zero tokens used.
-    Handles formats:
-      1. Question text
-      1) Question text
-      Q1. Question text
-      Q.1 Question text
-    Multi-line questions are joined automatically.
-    """
-    print("  Identifying questions (local parser — no API tokens used) ...")
+    print("  Identifying questions (local parser - no API tokens used) ...")
 
     lines = raw_text.splitlines()
     questions = []
@@ -151,7 +135,6 @@ def extract_questions(raw_text):
         if not line:
             continue
 
-        # Match numbered question starters: 1. / 1) / Q1. / Q.1 / Q1) etc.
         m = re.match(
             r'^(?:Q\.?\s*)?(\d{1,3})\s*[.)]\s+(.+)',
             line, re.IGNORECASE
@@ -160,34 +143,26 @@ def extract_questions(raw_text):
             num = int(m.group(1))
             text = m.group(2).strip()
 
-            # Only accept if number is sequential (avoids matching random numbers)
             if current_num is None or num == current_num + 1:
                 if current:
                     questions.append(current)
                 current = text
                 current_num = num
             else:
-                # Continuation line that looks like a number but isn't sequential
                 if current:
                     current += " " + line
         else:
-            # Continuation of previous question
             if current is not None:
-                # Stop appending if line looks like a section header (all caps, short)
                 if not (len(line) < 40 and line.isupper()):
                     current += " " + line
 
     if current:
         questions.append(current)
 
-    # Clean up extra whitespace in each question
     questions = [re.sub(r'\s+', ' ', q).strip() for q in questions if q.strip()]
     return questions
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  AI — ANSWER QUESTIONS
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def answer_question(question, q_num, total):
     print(f"  Answering Q{q_num}/{total}: {question[:65]}{'...' if len(question)>65 else ''}")
@@ -198,18 +173,18 @@ Answer the following question in a detailed, clear, exam-ready format.
 
 Rules:
 - Give a comprehensive answer suitable for university exams
-- Structure: definition → explanation → example (where applicable) → conclusion
+- Structure: definition -> explanation -> example (where applicable) -> conclusion
 - For compare/contrast questions: use clear distinctions
 - For list/enumerate questions: use numbered or clear points
 - For algorithmic/numerical questions: show step-by-step working
-- Write in plain text only — NO markdown symbols like **, ##, *, or -
+- Write in plain text only - NO markdown symbols like **, ##, *, or -
 - answer according to the question asked according to there capacity of qution 2 marks, 4 marks, 10 marks, etc
 
 Question: {question}
 
 Answer:"""
 
-    resp = client.chat.completions.create(
+    resp = get_groq_client().chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
@@ -229,10 +204,8 @@ def clean_text(text):
 
 
 def detect_marks(question):
-    """Detect marks mentioned in a question string. Returns int or None."""
     if not question:
         return None
-    # Common patterns: [10], (2), 2 marks, 2M, 2 M
     patterns = [r"\[(\d{1,3})\]", r"\((\d{1,3})\)", r"(\d{1,3})\s*(?:marks?|mark)\b", r"(\d{1,3})\s*M\b"]
     for p in patterns:
         m = re.search(p, question, re.IGNORECASE)
@@ -245,22 +218,17 @@ def detect_marks(question):
 
 
 def find_marks_for_questions(raw_text, questions):
-    """Try to locate marks in the original raw_text for each numbered question.
-    Returns a list of detected mark ints (or None) aligned with `questions`.
-    """
     results = [None] * len(questions)
     if not raw_text:
         return results
 
     for i, q in enumerate(questions, 1):
-        # Try to find a block starting with the question number
         pattern = rf'(?:^|\n)\s*{i}[\.)]\s*(.*?)\n(?:\s*\n|$)'
         m = re.search(pattern, raw_text, re.DOTALL)
         block = None
         if m:
             block = m.group(1)
         else:
-            # fallback: look within first 300 chars after the number
             pattern2 = rf'{i}[\.)]\s*(.{0,300})'
             m2 = re.search(pattern2, raw_text, re.DOTALL)
             if m2:
@@ -272,15 +240,11 @@ def find_marks_for_questions(raw_text, questions):
                 results[i-1] = mk
                 continue
 
-        # final fallback: try detecting in the extracted question text
         results[i-1] = detect_marks(q)
 
     return results
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PDF GENERATION
-# ═══════════════════════════════════════════════════════════════════════════════
 
 DARK_BLUE  = colors.HexColor("#1a2340")
 MED_BLUE   = colors.HexColor("#2d4a8a")
@@ -350,16 +314,15 @@ def generate_pdf(qa_pairs, output_path, source_filename, subject="", level="", s
         output_path, pagesize=A4,
         leftMargin=2.2*cm, rightMargin=2.2*cm,
         topMargin=2.5*cm,  bottomMargin=2.5*cm,
-        title="Question Bank – Detailed Answers",
+        title="Question Bank - Detailed Answers",
         author="QB Solver (Groq / Llama-3.3)",
     )
 
     story = []
 
-    # ── Header ────────────────────────────────────────────────────────────────
     story.append(Spacer(1, 0.4*cm))
 
-    hdr = Table([[Paragraph("QUESTION BANK — DETAILED ANSWERS",
+    hdr = Table([[Paragraph("QUESTION BANK - DETAILED ANSWERS",
         ParagraphStyle("h", fontName="Helvetica-Bold", fontSize=9,
                        textColor=colors.white, alignment=TA_CENTER))]],
         colWidths=[W], rowHeights=[24])
@@ -384,17 +347,15 @@ def generate_pdf(qa_pairs, output_path, source_filename, subject="", level="", s
     story.append(title_tbl)
     story.append(Spacer(1, 0.3*cm))
 
-    meta = meta = (f"Subject: {subject}   •   Level: {level}   •   Questions: {len(qa_pairs)}"
-        f"   •   Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+    meta = meta = (f"Subject: {subject}   |   Level: {level}   |   Questions: {len(qa_pairs)}"
+        f"   |   Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
     story.append(Paragraph(meta, styles["subtitle"]))
     story.append(Spacer(1, 0.2*cm))
     story.append(HRFlowable(width="100%", thickness=1.5, color=ACCENT))
     story.append(Spacer(1, 0.3*cm))
 
-    # ── Q&A blocks ────────────────────────────────────────────────────────────
     for i, qa in enumerate(qa_pairs, 1):
 
-        # Question box
         q_tbl = Table([
             [Paragraph(f"QUESTION {i} of {len(qa_pairs)}", styles["section_num"])],
             [Paragraph(qa["question"], styles["question"])],
@@ -408,7 +369,6 @@ def generate_pdf(qa_pairs, output_path, source_filename, subject="", level="", s
             ("LINEBEFORE",    (0,0),(0,-1),  3, Q_BORDER),
         ]))
 
-        # Answer label badge
         ans_badge = Table([[Paragraph("ANSWER",
             ParagraphStyle("ab", fontName="Helvetica-Bold", fontSize=8,
                            textColor=colors.white))]],
@@ -430,7 +390,6 @@ def generate_pdf(qa_pairs, output_path, source_filename, subject="", level="", s
         story.append(HRFlowable(width="100%", thickness=0.5,
                                 color=DIVIDER, spaceAfter=14))
 
-    # ── Footer ────────────────────────────────────────────────────────────────
     story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=1, color=MED_BLUE))
     story.append(Spacer(1, 0.2*cm))
@@ -449,14 +408,6 @@ def generate_pdf(qa_pairs, output_path, source_filename, subject="", level="", s
     print(f"  PDF saved: {output_path}")
 
 def parse_instruction_marks(instruction, q_num, total):
-    """
-    Parse user instruction to figure out how many marks this question is worth.
-    Understands patterns like:
-      - "first 10 questions 2 marks, rest 10 marks"
-      - "first 5 short, remaining detailed"
-      - "questions 1-10: 2 marks, 11 onwards: 10 marks"
-    Returns an integer mark value or None.
-    """
     text = instruction.lower()
 
     first_n_match = re.search(
@@ -521,10 +472,8 @@ def marks_to_word_range(marks):
 def answer_question_personalised(question, q_num, total, subject, level, style, marks=""):
     print(f"  Answering Q{q_num}/{total}: {question[:65]}{'...' if len(question)>65 else ''}")
 
-    # Priority 1: parse from user instruction (position-aware)
     instruction_marks = parse_instruction_marks(style, q_num, total)
 
-    # Priority 2: detect from question text or passed marks arg
     detected = detect_marks(question)
     if not detected and marks:
         try:
@@ -535,7 +484,7 @@ def answer_question_personalised(question, q_num, total, subject, level, style, 
     final_marks = instruction_marks if instruction_marks is not None else detected
     wmin, wmax = marks_to_word_range(final_marks)
     mark_label = f"{final_marks}-mark" if final_marks else "standard"
-    print(f"       Q{q_num}: {mark_label} → {wmin}–{wmax} words")
+    print(f"       Q{q_num}: {mark_label} -> {wmin}-{wmax} words")
 
     prompt = f"""You are an expert academic tutor. The student's instruction is:
 
@@ -555,7 +504,7 @@ Question: {question}
 Answer:"""
 
     max_tokens = min(2048, int(wmax * 2.2))
-    resp = client.chat.completions.create(
+    resp = get_groq_client().chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.25,
@@ -572,9 +521,6 @@ Answer:"""
     return {"question": question, "answer": clean_text(answer_text)}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     if len(sys.argv) < 2:
@@ -590,10 +536,9 @@ def main():
     output_file = Path(input_file).stem + "_ANSWERS.pdf"
 
     print("\n" + "="*60)
-    print("  QB SOLVER — Powered by Groq + Llama-3.3-70b")
+    print("  QB SOLVER - Powered by Groq + Llama-3.3-70b")
     print("="*60)
 
-    # ── Ask user for a single free-form instruction ───────────────────────────
     print("\n  Enter your instruction for how the AI should answer (then press Enter):")
     print("  Example: Engineering Sem 4 OS exam, first 10 questions short 2-mark answers, rest detailed 10-mark answers with examples")
     print()
@@ -601,7 +546,6 @@ def main():
     if not user_instruction:
         user_instruction = "detailed, exam-ready answers suitable for a university student"
 
-    # These are kept for PDF metadata — extracted from instruction or set to defaults
     subject = user_instruction[:60]
     level   = ""
     answer_style = user_instruction
@@ -625,13 +569,11 @@ def main():
     print(f"\n[3/4] Generating answers...")
     qa_pairs = []
 
-    # Try to detect marks from original extracted raw text to preserve annotations
     marks_list = find_marks_for_questions(raw_text, questions)
 
     for i, q in enumerate(questions, 1):
         try:
             detected_marks = marks_list[i-1] if marks_list and i-1 < len(marks_list) else None
-            # fallback to direct detection in case find_marks failed
             if not detected_marks:
                 detected_marks = detect_marks(q)
             if detected_marks:
